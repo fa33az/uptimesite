@@ -29,6 +29,14 @@ A lightweight, native Windows C++ application to monitor the status of multiple 
 - Windows Operating System
 - Visual Studio Build Tools (MSVC compiler cl.exe and VsDevCmd.bat environment)
 
+## IDE Setup
+
+The repository includes configuration files to automatically set up C++17 diagnostics in your code editor:
+- .vscode/c_cpp_properties.json: Configures standard IntelliSense for Visual Studio Code and Cursor.
+- compile_flags.txt: Configures clangd-based language servers.
+
+These files ensure that standard filesystem classes (std::filesystem) are resolved correctly by your editor's static analysis.
+
 ## Setup and Configuration
 
 Configure the application by editing config.txt in the root folder:
