@@ -1,0 +1,16 @@
+# Website Status Monitor Configuration File
+# Comments start with '#'
+
+# Interval in seconds between checks
+interval=10
+
+# Optional Telegram credentials for notifications (leave empty to disable)
+telegram_token=
+telegram_chat_id=
+
+# Websites to monitor (one per line, must start with http:// or https://)
+https://www.google.com
+https://www.github.com
+https://httpbin.org/status/200
+https://httpbin.org/status/404
+https://invalid-domain-name-testing-123.org
