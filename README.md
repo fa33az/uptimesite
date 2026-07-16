@@ -6,19 +6,23 @@ A lightweight, native Windows C++ application to monitor the status of multiple 
 
 - Native Windows WinHTTP: Built directly on Windows WinHTTP APIs, ensuring zero external dependencies (no need to link libcurl or openssl).
 - Parallel Monitoring: Monitors multiple websites simultaneously using asynchronous threads (std::async) to prevent slow servers from blocking other checks.
-- State-based Telegram Alerts: Alerts are sent only when a website's state transitions (UP to DOWN, or DOWN back to UP) to avoid spamming.
+- Latency Tracking: Measures and displays the response time in milliseconds for each website check.
+- Retry Mechanism: Triggers Telegram alerts only on the third consecutive failure, minimizing false alarms from temporary network glitches.
+- Auto-Reload Configuration: Automatically monitors config.txt for disk modifications and reloads the monitored list and intervals on the fly without resetting state history for unchanged websites.
+- Thread-Safe Logging: Uses standard mutexes to prevent log collision in multi-threaded executions and appends clean, timestamped logs to monitor.log.
 - Colorized Terminal Logs: Green output indicates UP (HTTP 200), red indicates DOWN (with detailed WinHTTP error codes or bad status codes).
 - Configurable: Adjust polling interval and website lists directly in config.txt.
 
 ## How It Works
 
 1. Configuration Loader: The program loads config.txt, parses key-value pairs (interval, Telegram token, Telegram chat ID), and reads the target URLs.
-2. URL Parser: Each URL is parsed into protocol, host, port, and query path components.
+2. File Watcher: Tracks the last write time of config.txt using std::filesystem. When a change is detected, it reloads config.txt, mapping previous state records to existing targets.
 3. Async Check Loop:
    - For each URL, standard std::async is used to spin up a request thread.
+   - Measures time duration using std::chrono::high_resolution_clock.
    - WinHttpOpen, WinHttpConnect, WinHttpOpenRequest, WinHttpSendRequest, and WinHttpReceiveResponse are used to check the target.
    - WinHttpQueryHeaders retrieves the HTTP response code.
-4. Alerts: If a Telegram token and chat ID are configured, the tool automatically url-encodes messages and sends GET requests to the Telegram Bot API when a monitored website goes offline or comes back online.
+4. Alerts: If a Telegram token and chat ID are configured, the tool automatically url-encodes messages and sends GET requests to the Telegram Bot API when a monitored website goes offline (after 3 consecutive failures) or comes back online.
 
 ## Prerequisites
 
@@ -74,9 +78,13 @@ uptimesite.exe
 [+] Monitoring 5 websites every 10 seconds.
 [-] Telegram alerts disabled (credentials missing in config.txt).
 -------------------------------------------
-[2026-07-16 14:53:45] [UP]   https://www.google.com - HTTP 200
-[2026-07-16 14:53:45] [UP]   https://www.github.com - HTTP 200
-[2026-07-16 14:53:53] [DOWN] https://httpbin.org/status/200 - Error: WinHttpReceiveResponse failed (12002)
-[2026-07-16 14:53:53] [DOWN] https://httpbin.org/status/404 - Error: WinHttpReceiveResponse failed (12002)
-[2026-07-16 14:53:53] [DOWN] https://invalid-domain-name-testing-123.org - Error: WinHttpSendRequest failed (12007)
+[2026-07-16 15:01:19] [UP]   https://www.google.com - HTTP 200 (216 ms)
+[2026-07-16 15:01:19] [UP]   https://www.github.com - HTTP 200 (286 ms)
+[2026-07-16 15:01:20] [DOWN] https://httpbin.org/status/200 - Error: HTTP Status 503 (Failure 1/3, 1089 ms)
+[2026-07-16 15:01:20] [DOWN] https://httpbin.org/status/404 - Error: HTTP Status 503 (Failure 1/3, 1089 ms)
+[2026-07-16 15:01:20] [DOWN] https://invalid-domain-name-testing-123.org - Error: WinHttpSendRequest failed (12007) (Failure 1/3, 104 ms)
+[*] Config file changed. Reloading configuration...
+[+] Reloaded 6 websites. Interval: 10s.
+-------------------------------------------
+[2026-07-16 15:01:30] [UP]   https://www.google.com - HTTP 200 (147 ms)
 ```

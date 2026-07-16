@@ -30,7 +30,7 @@ echo [+] Initializing environment with !DEV_CMD!...
 call "!DEV_CMD!" > nul
 
 echo [+] Compiling main.cpp...
-cl.exe /EHsc /O2 /Fe:uptimesite.exe main.cpp
+cl.exe /EHsc /O2 /std:c++17 /Fe:uptimesite.exe main.cpp
 
 if !ERRORLEVEL! neq 0 (
     echo [-] Compilation failed!

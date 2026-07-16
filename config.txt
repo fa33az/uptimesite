@@ -14,3 +14,4 @@ https://www.github.com
 https://httpbin.org/status/200
 https://httpbin.org/status/404
 https://invalid-domain-name-testing-123.org
+https://example.com

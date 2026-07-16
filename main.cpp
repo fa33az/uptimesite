@@ -9,10 +9,16 @@
 #include <iomanip>
 #include <algorithm>
 #include <ctime>
+#include <filesystem>
+#include <mutex>
+#include <unordered_map>
 #include <windows.h>
 #include <winhttp.h>
 
 #pragma comment(lib, "winhttp.lib")
+
+// Mutex for logging synchronization
+std::mutex log_mutex;
 
 // Set console text color
 void SetColor(int color) {
@@ -247,6 +253,7 @@ Config LoadConfig(const std::string& filename) {
     Config config;
     std::ifstream file(filename);
     if (!file.is_open()) {
+        std::lock_guard<std::mutex> lock(log_mutex);
         std::cerr << "[-] Warning: Could not open config file " << filename << ". Using defaults." << std::endl;
         return config;
     }
@@ -295,6 +302,8 @@ struct SiteState {
     bool is_parsed = false;
     bool last_up = true;
     bool has_run = false;
+    int consecutive_failures = 0;
+    int consecutive_failures_before_recovery = 0;
 };
 
 struct CheckResult {
@@ -302,7 +311,94 @@ struct CheckResult {
     bool is_up;
     int status_code;
     std::string error;
+    int latency_ms;
 };
+
+// Mutex-protected unified logger for console and file (monitor.log)
+void LogStatus(const std::string& timestamp, const std::string& url, bool is_up, int status_code, int latency_ms, const std::string& error, int consecutive_failures) {
+    std::lock_guard<std::mutex> lock(log_mutex);
+    
+    // Console output
+    std::cout << "[" << timestamp << "] ";
+    if (is_up) {
+        SetColor(10); // Green
+        std::cout << "[UP]   ";
+        SetColor(7);
+        std::cout << url << " - HTTP " << status_code << " (" << latency_ms << " ms)" << std::endl;
+    } else {
+        SetColor(12); // Red
+        std::cout << "[DOWN] ";
+        SetColor(7);
+        std::cout << url << " - Error: " << error << " (Failure " << consecutive_failures << "/3, " << latency_ms << " ms)" << std::endl;
+    }
+    
+    // Append clean logs without terminal formatting to monitor.log
+    std::ofstream log_file("monitor.log", std::ios::app);
+    if (log_file.is_open()) {
+        log_file << "[" << timestamp << "] ";
+        if (is_up) {
+            log_file << "[UP]   " << url << " - HTTP " << status_code << " (" << latency_ms << " ms)\n";
+        } else {
+            log_file << "[DOWN] " << url << " - Error: " << error << " (Failure " << consecutive_failures << "/3, " << latency_ms << " ms)\n";
+        }
+    }
+}
+
+// Handles configuration auto-reload while preserving state of existing entries
+void ReloadConfigIfNeeded(const std::string& filename, Config& config, std::vector<SiteState>& sites, std::filesystem::file_time_type& last_time) {
+    if (!std::filesystem::exists(filename)) return;
+    
+    auto current_time = std::filesystem::last_write_time(filename);
+    if (current_time > last_time) {
+        {
+            std::lock_guard<std::mutex> lock(log_mutex);
+            SetColor(11); // Cyan
+            std::cout << "[*] Config file changed. Reloading configuration..." << std::endl;
+            SetColor(7);
+        }
+        
+        Config new_config = LoadConfig(filename);
+        
+        // Build state preservation map
+        std::unordered_map<std::string, SiteState> existing_states;
+        for (const auto& site : sites) {
+            existing_states[site.raw_url] = site;
+        }
+        
+        std::vector<SiteState> new_sites;
+        for (const auto& raw : new_config.websites) {
+            SiteState state;
+            state.raw_url = raw;
+            state.is_parsed = ParseURL(raw, state.url);
+            if (state.is_parsed) {
+                // Restore tracking values if the site existed previously
+                auto it = existing_states.find(raw);
+                if (it != existing_states.end()) {
+                    state.last_up = it->second.last_up;
+                    state.has_run = it->second.has_run;
+                    state.consecutive_failures = it->second.consecutive_failures;
+                    state.consecutive_failures_before_recovery = it->second.consecutive_failures_before_recovery;
+                }
+                new_sites.push_back(state);
+            } else {
+                std::lock_guard<std::mutex> lock(log_mutex);
+                SetColor(14); // Yellow
+                std::cerr << "[-] Skipping invalid URL: " << raw << std::endl;
+                SetColor(7);
+            }
+        }
+        
+        config = new_config;
+        sites = new_sites;
+        last_time = current_time;
+        
+        {
+            std::lock_guard<std::mutex> lock(log_mutex);
+            std::cout << "[+] Reloaded " << sites.size() << " websites. Interval: " << config.interval << "s." << std::endl;
+            std::cout << "-------------------------------------------" << std::endl;
+        }
+    }
+}
 
 int main() {
     // Print banner
@@ -314,7 +410,13 @@ int main() {
     std::cout << "===========================================" << std::endl;
     SetColor(7); // Reset
     
-    Config config = LoadConfig("config.txt");
+    const std::string config_file = "config.txt";
+    Config config = LoadConfig(config_file);
+    
+    std::filesystem::file_time_type last_config_time;
+    if (std::filesystem::exists(config_file)) {
+        last_config_time = std::filesystem::last_write_time(config_file);
+    }
     
     if (config.websites.empty()) {
         SetColor(12); // Red
@@ -353,6 +455,14 @@ int main() {
     std::cout << "-------------------------------------------" << std::endl;
 
     while (true) {
+        // Auto-reload configuration if updated on disk
+        ReloadConfigIfNeeded(config_file, config, sites, last_config_time);
+        
+        if (sites.empty()) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+
         std::vector<std::future<CheckResult>> futures;
         
         for (size_t i = 0; i < sites.size(); ++i) {
@@ -364,7 +474,13 @@ int main() {
                 
                 int sc = 0;
                 std::string err;
+                
+                auto start = std::chrono::high_resolution_clock::now();
                 bool check = CheckHTTPStatus(sites[i].url, sc, err);
+                auto end = std::chrono::high_resolution_clock::now();
+                
+                res.latency_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+                
                 if (check && sc == 200) {
                     res.is_up = true;
                     res.status_code = sc;
@@ -386,30 +502,35 @@ int main() {
             struct tm time_info;
             localtime_s(&time_info, &now_time);
             
-            std::cout << "[" << std::put_time(&time_info, "%Y-%m-%d %H:%M:%S") << "] ";
+            std::ostringstream ts;
+            ts << std::put_time(&time_info, "%Y-%m-%d %H:%M:%S");
+            std::string timestamp = ts.str();
             
             if (res.is_up) {
-                SetColor(10); // Green
-                std::cout << "[UP]   ";
-                SetColor(7);
-                std::cout << site.raw_url << " - HTTP " << res.status_code << std::endl;
+                site.consecutive_failures = 0;
+                
+                LogStatus(timestamp, site.raw_url, true, res.status_code, res.latency_ms, "", 0);
                 
                 if (!site.last_up && site.has_run) {
-                    std::string msg = "🟢 WEBSITE RECOVERED: " + site.raw_url + " is now back online (HTTP 200).";
-                    SendTelegramMessage(config.telegram_token, config.telegram_chat_id, msg);
+                    // Send alert if we previously notified it was down
+                    if (site.consecutive_failures_before_recovery >= 3) {
+                        std::string msg = "🟢 WEBSITE RECOVERED: " + site.raw_url + " is now back online (HTTP 200 after " + std::to_string(site.consecutive_failures_before_recovery) + " failures).";
+                        SendTelegramMessage(config.telegram_token, config.telegram_chat_id, msg);
+                    }
                 }
                 site.last_up = true;
+                site.consecutive_failures_before_recovery = 0;
             } else {
-                SetColor(12); // Red
-                std::cout << "[DOWN] ";
-                SetColor(7);
-                std::cout << site.raw_url << " - Error: " << res.error << std::endl;
+                site.consecutive_failures++;
+                site.consecutive_failures_before_recovery = site.consecutive_failures;
                 
-                if (site.last_up || !site.has_run) {
-                    std::string msg = "🔴 WEBSITE DOWN ALERT: " + site.raw_url + " is OFFLINE! Error: " + res.error;
+                LogStatus(timestamp, site.raw_url, false, res.status_code, res.latency_ms, res.error, site.consecutive_failures);
+                
+                if (site.consecutive_failures == 3) {
+                    std::string msg = "🔴 WEBSITE DOWN ALERT: " + site.raw_url + " is OFFLINE! (Failed 3 times consecutively). Last error: " + res.error;
                     SendTelegramMessage(config.telegram_token, config.telegram_chat_id, msg);
+                    site.last_up = false;
                 }
-                site.last_up = false;
             }
             site.has_run = true;
         }
